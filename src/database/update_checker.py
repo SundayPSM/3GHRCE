@@ -58,8 +58,6 @@ class UpdateChecker:
         except Error as e:
             logger.error(f"Error creating CheckDBUpdate table: {e}")
             return False
-        finally:
-            self.db_manager.close_connection()
     
     def get_last_processed_data(self, table_name: str) -> Optional[Tuple[str, str]]:
         """
@@ -98,8 +96,6 @@ class UpdateChecker:
         except Error as e:
             logger.error(f"Error getting last processed data for {table_name}: {e}")
             return None
-        finally:
-            self.db_manager.close_connection()
     
     def update_processed_data(self, table_name: str, datayear: str, uuid: str) -> bool:
         """
@@ -140,8 +136,6 @@ class UpdateChecker:
         except Error as e:
             logger.error(f"Error updating CheckDBUpdate for {table_name}: {e}")
             return False
-        finally:
-            self.db_manager.close_connection()
     
     def determine_update_needs(self, scraped_data: Dict[str, List[Tuple[str, str]]]) -> Dict[str, List[str]]:
         """
@@ -220,8 +214,6 @@ class UpdateChecker:
         except Error as e:
             logger.error(f"Error getting tracked tables: {e}")
             return []
-        finally:
-            self.db_manager.close_connection()
     
     def cleanup_orphaned_records(self, current_tables: List[str]) -> bool:
         """
@@ -257,6 +249,4 @@ class UpdateChecker:
             
         except Error as e:
             logger.error(f"Error cleaning up orphaned records: {e}")
-            return False
-        finally:
-            self.db_manager.close_connection() 
+            return False 

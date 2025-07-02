@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 from io import StringIO
 import pandas as pd
+from ..config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -180,12 +181,30 @@ class CMSAPIClient:
             df = pd.DataFrame(data)
             logger.info(f"Converted {len(df)} records to DataFrame for {table_name}")
             
-            # Clean the DataFrame
+            # Debug: Print column names for nh_performance_measures
+            if table_name == "nh_performance_measures":
+                logger.info(f"nh_performance_measures API columns: {list(df.columns)}")
+            
+            # Clean the DataFrame and ensure all data is string
             df_clean = self._clean_dataframe(df)
             
-            # Create table and insert data
-            if db_manager.create_table(table_name, df_clean):
-                if db_manager.insert_data(table_name, df_clean):
+            # Add datayear column for relevant tables
+            if table_name in ["snf_owners", "snf_enrollments", "snf_ownership_changes", "nh_performance_measures"]:
+                df_clean["datayear"] = datayear
+
+            # Get predefined schema for this table
+            schema_columns = Settings.TABLE_SCHEMAS.get(table_name, [])
+            
+            if not schema_columns:
+                logger.error(f"No predefined schema found for table {table_name}")
+                return False
+            
+            # Align DataFrame columns with predefined schema
+            df_aligned = self._align_dataframe_to_schema(df_clean, schema_columns, table_name)
+            
+            # Create table using predefined schema
+            if db_manager.create_table_with_schema(table_name, schema_columns):
+                if db_manager.insert_data(table_name, df_aligned):
                     # Update CheckDBUpdate table
                     if update_checker.update_processed_data(table_name, datayear, dataset_uuid):
                         logger.info(f"Successfully processed {table_name}: {datayear} - {dataset_uuid}")
@@ -201,8 +220,63 @@ class CMSAPIClient:
                 return False
                 
         except Exception as e:
-            logger.error(f"Error in fetch_and_insert_data for {table_name}: {str(e)}")
+            logger.error(f"Error in fetch_and_insert_data for {table_name}: {e}")
             return False
+
+    def _align_dataframe_to_schema(self, df: pd.DataFrame, schema_columns: list, table_name: str = None) -> pd.DataFrame:
+        """
+        Aligns DataFrame columns with predefined schema, filling missing columns with empty strings.
+        Uses column mapping if available for the table.
+        
+        Args:
+            df (pd.DataFrame): Original DataFrame
+            schema_columns (list): List of expected column names
+            table_name (str): Name of the table for column mapping
+            
+        Returns:
+            pd.DataFrame: DataFrame aligned with schema
+        """
+        try:
+            # Get column mapping for this table if available
+            column_mapping = Settings.COLUMN_MAPPINGS.get(table_name, {})
+            
+            # Create a new DataFrame with the exact schema columns
+            df_aligned = pd.DataFrame(columns=schema_columns)
+            
+            # For each row in the original DataFrame, map values to schema columns
+            aligned_rows = []
+            for _, row in df.iterrows():
+                new_row = {}
+                for col in schema_columns:
+                    # Try to find the value using column mapping first
+                    value_found = False
+                    for api_col, db_col in column_mapping.items():
+                        if db_col == col and api_col in row:
+                            new_row[col] = str(row[api_col]) if pd.notna(row[api_col]) else ""
+                            value_found = True
+                            break
+                    
+                    # If not found via mapping, try direct match
+                    if not value_found:
+                        if col in row:
+                            new_row[col] = str(row[col]) if pd.notna(row[col]) else ""
+                        else:
+                            new_row[col] = ""
+                aligned_rows.append(new_row)
+            
+            # Create new DataFrame with aligned data
+            df_aligned = pd.DataFrame(aligned_rows, columns=schema_columns)
+            
+            # Ensure all data is string type
+            for col in df_aligned.columns:
+                df_aligned[col] = df_aligned[col].astype(str)
+            
+            logger.info(f"Aligned DataFrame from {len(df.columns)} to {len(schema_columns)} columns")
+            return df_aligned
+            
+        except Exception as e:
+            logger.error(f"Error aligning DataFrame to schema: {e}")
+            return df
     
     async def get_csv_metadata(self, dataset_id: str) -> Optional[Dict[str, Any]]:
         """

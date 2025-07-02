@@ -13,6 +13,9 @@ import logging
 import asyncio
 from typing import Dict, List, Tuple, Optional, Any
 import pandas as pd
+from tqdm import tqdm
+import re
+from datetime import datetime
 
 from ..html_scrapers.dataset_versions_scraper import DatasetVersionsScraper
 from ..data_extraction.cms_api_client import CMSAPIClient
@@ -27,18 +30,97 @@ class DatasetOrchestrator:
     """Orchestrates the complete dataset processing pipeline."""
     
     def __init__(self):
-        self.scraper = DatasetVersionsScraper()
+        self.scraper = DatasetVersionsScraper(timeout=Settings.API_CONFIG['timeout'])
         self.api_client = CMSAPIClient()
-        self.db_manager = MySQLManager()
+        self.db_manager = MySQLManager(
+            host=Settings.DB_CONFIG['host'],
+            port=Settings.DB_CONFIG['port'],
+            user=Settings.DB_CONFIG['user'],
+            password=Settings.DB_CONFIG['password'],
+            database=Settings.DB_CONFIG['database']
+        )
         self.update_checker = UpdateChecker(self.db_manager)
+        # Use centralized mapping from settings
+        self.url_to_table_map = Settings.URL_TO_TABLE_MAP
+    
+    def _parse_datayear(self, datayear: str) -> datetime:
+        """
+        Parse datayear string into a datetime object for sorting.
+        Handles formats like:
+        - "January 2025", "February 2025", etc.
+        - "Q1 2025", "Q2 2025", etc.
+        - "2025", "2024", etc.
         
-        # Map API docs URLs to table names
-        self.url_to_table_map = {
-            "https://data.cms.gov/provider-characteristics/hospitals-and-other-facilities/skilled-nursing-facility-all-owners/api-docs": "snf_owners",
-            "https://data.cms.gov/provider-characteristics/hospitals-and-other-facilities/skilled-nursing-facility-enrollments/api-docs": "snf_enrollments",
-            "https://data.cms.gov/provider-characteristics/hospitals-and-other-facilities/skilled-nursing-facility-change-of-ownership/api-docs": "snf_ownership_changes",
-            "https://data.cms.gov/quality-of-care/nursing-home-affiliated-entity-performance-measures/api-docs": "nh_performance_measures"
-        }
+        Args:
+            datayear (str): The datayear string to parse
+            
+        Returns:
+            datetime: Parsed datetime object
+        """
+        datayear = datayear.strip()
+        
+        # Handle month formats: "January 2025", "Feb 2025", etc.
+        month_pattern = r'(\w+)\s+(\d{4})'
+        month_match = re.match(month_pattern, datayear, re.IGNORECASE)
+        if month_match:
+            month_str, year_str = month_match.groups()
+            month_map = {
+                'january': 1, 'jan': 1,
+                'february': 2, 'feb': 2,
+                'march': 3, 'mar': 3,
+                'april': 4, 'apr': 4,
+                'may': 5,
+                'june': 6, 'jun': 6,
+                'july': 7, 'jul': 7,
+                'august': 8, 'aug': 8,
+                'september': 9, 'sep': 9, 'sept': 9,
+                'october': 10, 'oct': 10,
+                'november': 11, 'nov': 11,
+                'december': 12, 'dec': 12
+            }
+            month = month_map.get(month_str.lower())
+            if month:
+                return datetime(int(year_str), month, 1)
+        
+        # Handle quarter formats: "Q1 2025", "Q2 2025", etc.
+        quarter_pattern = r'Q(\d)\s+(\d{4})'
+        quarter_match = re.match(quarter_pattern, datayear, re.IGNORECASE)
+        if quarter_match:
+            quarter, year_str = quarter_match.groups()
+            quarter = int(quarter)
+            # Convert quarter to month (Q1=Jan, Q2=Apr, Q3=Jul, Q4=Oct)
+            month = (quarter - 1) * 3 + 1
+            return datetime(int(year_str), month, 1)
+        
+        # Handle year-only formats: "2025", "2024", etc.
+        year_pattern = r'(\d{4})'
+        year_match = re.match(year_pattern, datayear)
+        if year_match:
+            year = int(year_match.group(1))
+            return datetime(year, 1, 1)
+        
+        # If we can't parse it, return a very old date so it sorts to the beginning
+        logger.warning(f"Could not parse datayear format: {datayear}")
+        return datetime(1900, 1, 1)
+    
+    def _sort_versions_chronologically(self, version_list: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+        """
+        Sort dataset versions chronologically (oldest to newest).
+        
+        Args:
+            version_list (List[Tuple[str, str]]): List of (datayear, uuid) pairs
+            
+        Returns:
+            List[Tuple[str, str]]: Sorted list of (datayear, uuid) pairs
+        """
+        try:
+            # Sort by parsed datetime
+            sorted_versions = sorted(version_list, key=lambda x: self._parse_datayear(x[0]))
+            logger.info(f"Sorted {len(sorted_versions)} versions chronologically")
+            return sorted_versions
+        except Exception as e:
+            logger.error(f"Error sorting versions: {e}")
+            return version_list
     
     async def run_complete_pipeline(self) -> bool:
         """
@@ -57,6 +139,7 @@ class DatasetOrchestrator:
             
             # Step 2: Scrape Dataset Versions from all API docs
             scraped_data = await self._scrape_all_dataset_versions()
+            logger.info(f"Scraped data: {scraped_data}")
             if not scraped_data:
                 logger.error("Failed to scrape dataset versions")
                 return False
@@ -120,6 +203,9 @@ class DatasetOrchestrator:
                 for _, row in df_last_6.iterrows():
                     version_list.append((row['Version'], row['UUID']))
                 
+                # Sort versions chronologically (oldest to newest)
+                version_list = self._sort_versions_chronologically(version_list)
+                
                 scraped_data[table_name] = version_list
                 logger.info(f"Scraped {len(version_list)} versions for {table_name}")
                 
@@ -144,23 +230,24 @@ class DatasetOrchestrator:
         """
         try:
             logger.info(f"Processing dataset {table_name} with {len(uuids_to_fetch)} UUIDs")
-            
+            # Ensure DB connection before processing
+            if not self.db_manager.get_connection():
+                logger.error("No database connection available. Skipping dataset processing.")
+                return False
             # Process each UUID individually to ensure proper tracking
             success_count = 0
-            for uuid in uuids_to_fetch:
-                logger.info(f"Processing UUID: {uuid}")
-                
+            for idx, uuid in enumerate(tqdm(uuids_to_fetch, desc=f"{table_name} Progress")):
                 # Find the corresponding datayear for this UUID
                 datayear = None
                 for dy, uid in version_list:
                     if uid == uuid:
                         datayear = dy
                         break
-                
+                print(f"Processing Table: {table_name}, DataYear: {datayear}, UUID: {uuid} ({idx+1}/{len(uuids_to_fetch)})")
+                logger.info(f"Processing UUID: {uuid}")
                 if not datayear:
                     logger.warning(f"Could not find datayear for UUID {uuid}")
                     continue
-                
                 # Use the new method that handles everything in one go
                 if await self.api_client.fetch_and_insert_data(uuid, table_name, datayear, 
                                                               self.db_manager, self.update_checker):
@@ -168,10 +255,8 @@ class DatasetOrchestrator:
                     logger.info(f"Successfully processed UUID {uuid} for {table_name}")
                 else:
                     logger.error(f"Failed to process UUID {uuid} for {table_name}")
-            
             logger.info(f"Processed {success_count}/{len(uuids_to_fetch)} UUIDs for {table_name}")
             return success_count > 0
-                
         except Exception as e:
             logger.error(f"Error processing dataset {table_name}: {e}")
             return False

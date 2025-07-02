@@ -17,16 +17,16 @@ logger = logging.getLogger(__name__)
 class DatasetVersionsScraper:
     """Scraper for extracting Dataset Versions table from CMS data pages."""
     
-    def __init__(self, timeout: float = 30.0):
+    def __init__(self, timeout: float = 300.0):  # 5 minutes
         self.timeout = timeout
     
     async def scrape(self, url: str) -> pd.DataFrame:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
-            await page.goto(url, wait_until="networkidle")
+            await page.goto(url, wait_until="networkidle", timeout=self.timeout * 1000)
             # Wait for the "Dataset Versions" heading and table to appear
-            await page.wait_for_selector("h3:text('Dataset Versions') + table.table.table-sm.table-bordered")
+            await page.wait_for_selector("h3:text('Dataset Versions') + table.table.table-sm.table-bordered", timeout=self.timeout * 1000)
             # Select the table right after the heading
             table = page.locator("h3:text('Dataset Versions') + table.table.table-sm.table-bordered")
             # Extract headers

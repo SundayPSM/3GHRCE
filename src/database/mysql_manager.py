@@ -88,7 +88,7 @@ class MySQLManager:
             df (pandas.DataFrame): DataFrame whose schema is used to define the table.
 
         Returns:
-            bool: True if table created successfully, False otherwise.
+            bool: True if table created successfully or already exists, False otherwise.
         """
         if not self.connection:
             logger.error("No database connection available")
@@ -96,14 +96,7 @@ class MySQLManager:
             
         cursor = self.connection.cursor()
         try:
-            logger.info(f"Creating table {table_name} in database {self.database}")
-            
-            # Drop table if exists
-            try:
-                cursor.execute(f"DROP TABLE IF EXISTS `{self.database}`.`{table_name}`")
-                logger.info(f"Dropped existing table {table_name} if it existed")
-            except Error as e:
-                logger.warning(f"Warning while dropping table {table_name}: {e}")
+            logger.info(f"Creating table {table_name} in database {self.database} if it does not exist")
 
             # Rename long columns to fit MySQL constraints
             df_clean = self._sanitize_column_names(df)
@@ -114,7 +107,7 @@ class MySQLManager:
 
             columns = [f"`{col}` TEXT" for col in df_clean.columns]
             create_table_query = f"""
-            CREATE TABLE `{self.database}`.`{table_name}` (
+            CREATE TABLE IF NOT EXISTS `{self.database}`.`{table_name}` (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 {', '.join(columns)},
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -122,7 +115,7 @@ class MySQLManager:
             """
             cursor.execute(create_table_query)
             self.connection.commit()
-            logger.info(f"Table `{table_name}` created successfully with {len(columns)} columns")
+            logger.info(f"Table `{table_name}` created or already exists with {len(columns)} columns")
             return True
         except Error as e:
             logger.error(f"Error creating table {table_name}: {e}")
@@ -202,4 +195,76 @@ class MySQLManager:
         if self.connection and self.connection.is_connected():
             self.connection.close()
             logger.info("MySQL connection closed.")
-            self.connection = None 
+            self.connection = None
+    
+    def drop_all_tables(self):
+        """
+        Drops all tables in the current database. For testing/cleanup purposes only.
+        """
+        if not self.connection:
+            logger.error("No database connection available")
+            return False
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(f"SHOW TABLES IN `{self.database}`;")
+            tables = [row[0] for row in cursor.fetchall()]
+            for table in tables:
+                logger.info(f"Dropping table: {table}")
+                cursor.execute(f"DROP TABLE IF EXISTS `{self.database}`.`{table}`;")
+            self.connection.commit()
+            logger.info(f"Dropped {len(tables)} tables from database {self.database}")
+            return True
+        except Exception as e:
+            logger.error(f"Error dropping all tables: {e}")
+            return False
+        finally:
+            cursor.close()
+    
+    def create_table_with_schema(self, table_name: str, schema_columns: list) -> bool:
+        """
+        Creates a table in the MySQL database using a predefined schema.
+        All columns are forced to TEXT type for consistency.
+
+        Args:
+            table_name (str): Name of the table to create.
+            schema_columns (list): List of column names for the table.
+
+        Returns:
+            bool: True if table created successfully or already exists, False otherwise.
+        """
+        if not self.connection:
+            logger.error("No database connection available")
+            return False
+            
+        cursor = self.connection.cursor()
+        try:
+            logger.info(f"Creating table {table_name} in database {self.database} with predefined schema")
+
+            # Sanitize column names to fit MySQL constraints
+            sanitized_columns = []
+            for col in schema_columns:
+                if len(col) > 64:
+                    # Truncate long column names
+                    sanitized_col = col[:60] + "_" + str(hash(col) % 1000)
+                else:
+                    sanitized_col = col
+                sanitized_columns.append(sanitized_col)
+
+            # Create columns with TEXT type
+            columns = [f"`{col}` TEXT" for col in sanitized_columns]
+            create_table_query = f"""
+            CREATE TABLE IF NOT EXISTS `{self.database}`.`{table_name}` (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                {', '.join(columns)},
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+            cursor.execute(create_table_query)
+            self.connection.commit()
+            logger.info(f"Table `{table_name}` created or already exists with {len(columns)} columns")
+            return True
+        except Error as e:
+            logger.error(f"Error creating table {table_name}: {e}")
+            return False
+        finally:
+            cursor.close() 
